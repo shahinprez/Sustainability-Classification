@@ -1,9 +1,19 @@
 const express = require('express');
 const axios = require('axios');
 const path = require('path');
+const crypto = require('node:crypto');
 
 const app = express();
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '32kb' }));
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -69,19 +79,30 @@ async function updateRecord(recordId, fields) {
 }
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
+function matchesConfiguredToken(provided, configured) {
+  if (typeof provided !== 'string' || provided.length < 16 || provided.length > 512 ||
+      typeof configured !== 'string' || configured.length < 16) return false;
+  const providedHash = crypto.createHash('sha256').update(provided).digest();
+  const configuredHash = crypto.createHash('sha256').update(configured).digest();
+  return crypto.timingSafeEqual(providedHash, configuredHash);
+}
+
 function resolveCoder(token) {
-  if (token === CONFIG.CODER_A_TOKEN) return { id: 'A', name: CONFIG.CODER_A_NAME };
-  if (token === CONFIG.CODER_B_TOKEN) return { id: 'B', name: CONFIG.CODER_B_NAME };
-  if (token === CONFIG.ADMIN_TOKEN)   return { id: 'Test', name: 'Guest Tester' };
+  if (matchesConfiguredToken(token, CONFIG.CODER_A_TOKEN))
+    return { id: 'A', name: CONFIG.CODER_A_NAME };
+  if (matchesConfiguredToken(token, CONFIG.CODER_B_TOKEN))
+    return { id: 'B', name: CONFIG.CODER_B_NAME };
+  if (matchesConfiguredToken(token, CONFIG.ADMIN_TOKEN))
+    return { id: 'Test', name: 'Guest Tester' };
   return null;
 }
 
 function authMiddleware(req, res, next) {
-  const token = req.query.token || req.headers['x-coder-token'];
-  const coder = resolveCoder(token);
-  if (!coder) return res.status(401).json({ error: 'Invalid token. Use ?token=YOUR_TOKEN in the URL.' });
+  // Refuse missing credentials and never accept credentials in URLs.
+  const match = /^Bearer ([^\s]+)$/.exec(req.get('Authorization') || '');
+  const coder = resolveCoder(match ? match[1] : null);
+  if (!coder) return res.status(401).json({ error: 'Unauthorized.' });
   req.coder = coder;
-  req.token = token;
   next();
 }
 
@@ -127,11 +148,23 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
   }
 });
 
+// Accept only known labels and bounded text before writing to Airtable.
+function validDimensions(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= DIMENSIONS.length &&
+    value.every(d => typeof d === 'string' && DIMENSIONS.includes(d)) &&
+    new Set(value).size === value.length &&
+    !(value.includes('none') && value.length !== 1);
+}
+
 // Save coding for one post
 app.post('/api/save', authMiddleware, async (req, res) => {
   try {
-    const { recordId, imgDim, capDim, ovDim, note } = req.body;
-    if (!recordId) return res.status(400).json({ error: 'recordId required' });
+    const { recordId, imgDim, capDim, ovDim, note = '' } = req.body || {};
+    if (typeof recordId !== 'string' || !/^rec[A-Za-z0-9]{10,30}$/.test(recordId) ||
+        !validDimensions(imgDim) || !validDimensions(capDim) || !validDimensions(ovDim) ||
+        typeof note !== 'string' || note.length > 2000) {
+      return res.status(400).json({ error: 'Invalid annotation data.' });
+    }
 
     const coderKey = `Coder${req.coder.id}`;
     const fields = {
@@ -146,7 +179,7 @@ app.post('/api/save', authMiddleware, async (req, res) => {
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('Airtable save error:', JSON.stringify(detail));
-    res.status(500).json({ error: 'Failed to save to Airtable.', detail });
+    res.status(500).json({ error: 'Failed to save to Airtable.' });
   }
 });
 
@@ -197,11 +230,11 @@ const DIMENSIONS_JSON = JSON.stringify(DIMENSIONS);
 const DIMENSION_LABELS_JSON = JSON.stringify(DIMENSION_LABELS);
 
 app.get('/', (req, res) => {
-  const token = req.query.token || '';
-  res.send(buildHTML(token));
+  if (req.query.token !== undefined) return res.redirect(302, '/');
+  res.send(buildHTML());
 });
 
-function buildHTML(token) {
+function buildHTML() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1425,4 +1458,7 @@ init();
 
 // ── Start ──────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`CSR Coder running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log('CSR Coder running on port ' + PORT));
+}
+module.exports = { app, resolveCoder, validDimensions };
