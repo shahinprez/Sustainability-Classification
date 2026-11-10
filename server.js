@@ -1115,7 +1115,13 @@ function renderImages(urls) {
     return;
   }
 
-  container.innerHTML = \`<img id="mainImg" src="\${urls[0]}" alt="Post image" />\`;
+  container.replaceChildren();
+  if (!/^https?:\\/\\//i.test(urls[0])) { container.textContent = 'Invalid image URL'; return; }
+  const img = document.createElement('img');
+  img.id = 'mainImg';
+  img.alt = 'Post image';
+  img.src = urls[0];
+  container.appendChild(img);
   document.getElementById('imgPrev').style.display = urls.length > 1 ? 'flex' : 'none';
   document.getElementById('imgNext').style.display = urls.length > 1 ? 'flex' : 'none';
 
@@ -1139,7 +1145,7 @@ function goToImg(i) {
   const urls = posts[currentIdx].imageUrls;
   currentImgIdx = i;
   const img = document.getElementById('mainImg');
-  if (img) img.src = urls[i];
+  if (img && /^https?:\\/\\//i.test(urls[i])) img.src = urls[i];
   document.querySelectorAll('.image-dot').forEach((d, idx) => d.classList.toggle('active', idx === i));
 }
 
@@ -1292,11 +1298,13 @@ function dRenderPost(idx) {
       el.innerHTML = '<span class="dim-pill no-dim">None / Not coded</span>';
       return;
     }
-    el.innerHTML = dims.map(d => {
-      const isNone = d === 'none';
-      const label = DIMENSION_LABELS[d] || d;
-      return '<span class="dim-pill ' + (isNone ? 'no-dim' : 'has-dim') + '">' + label + '</span>';
-    }).join('');
+    el.replaceChildren();
+    dims.forEach(d => {
+      const pill = document.createElement('span');
+      pill.className = 'dim-pill ' + (d === 'none' ? 'no-dim' : 'has-dim');
+      pill.textContent = DIMENSION_LABELS[d] || String(d);
+      el.appendChild(pill);
+    });
   }
   renderPills(post.coderA_ov, 'dCoderADims');
   renderPills(post.coderB_ov, 'dCoderBDims');
@@ -1325,7 +1333,14 @@ function dRenderImages(urls) {
     container.innerHTML = '<div class="no-image">No image</div>';
     dots.innerHTML = ''; return;
   }
-  container.innerHTML = '<img id="dMainImg" src="' + urls[0] + '" style="max-width:100%;max-height:500px;object-fit:contain;display:block;border-radius:4px;" />';
+  container.replaceChildren();
+  if (!/^https?:\\/\\//i.test(urls[0])) { container.textContent = 'Invalid image URL'; return; }
+  const img = document.createElement('img');
+  img.id = 'dMainImg';
+  img.alt = 'Post image';
+  img.style.cssText = 'max-width:100%;max-height:500px;object-fit:contain;display:block;border-radius:4px;';
+  img.src = urls[0];
+  container.appendChild(img);
   document.getElementById('dImgPrev').style.display = urls.length > 1 ? 'flex' : 'none';
   document.getElementById('dImgNext').style.display = urls.length > 1 ? 'flex' : 'none';
   dots.innerHTML = urls.map((_,i) =>
@@ -1344,7 +1359,7 @@ function dGoToImg(i) {
   const urls = disagPosts[disagIdx].imageUrls;
   dImgIdx = i;
   const img = document.getElementById('dMainImg');
-  if (img) img.src = urls[i];
+  if (img && /^https?:\\/\\//i.test(urls[i])) img.src = urls[i];
   document.querySelectorAll('#dImageDots .image-dot').forEach((d,idx) => d.classList.toggle('active', idx===i));
 }
 
@@ -1437,7 +1452,7 @@ async function dSavePost() {
 
     // Check if this resolves the disagreement
     const myOv = dDraft.ovDim;
-    const otherOv = TOKEN === '' ? disagPosts[disagIdx].coderB_ov : disagPosts[disagIdx].coderA_ov;
+    const otherOv = coderId === 'A' ? disagPosts[disagIdx].coderB_ov : disagPosts[disagIdx].coderA_ov;
     const hasReal = dims => dims.some(d => d !== 'none' && d !== '');
     if (hasReal(myOv) === hasReal(otherOv)) {
       // Resolved! Remove from list
