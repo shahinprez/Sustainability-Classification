@@ -1,9 +1,19 @@
 const express = require('express');
 const axios = require('axios');
 const path = require('path');
+const crypto = require('node:crypto');
 
 const app = express();
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '32kb' }));
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -69,19 +79,30 @@ async function updateRecord(recordId, fields) {
 }
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
+function matchesConfiguredToken(provided, configured) {
+  if (typeof provided !== 'string' || provided.length < 16 || provided.length > 512 ||
+      typeof configured !== 'string' || configured.length < 16) return false;
+  const providedHash = crypto.createHash('sha256').update(provided).digest();
+  const configuredHash = crypto.createHash('sha256').update(configured).digest();
+  return crypto.timingSafeEqual(providedHash, configuredHash);
+}
+
 function resolveCoder(token) {
-  if (token === CONFIG.CODER_A_TOKEN) return { id: 'A', name: CONFIG.CODER_A_NAME };
-  if (token === CONFIG.CODER_B_TOKEN) return { id: 'B', name: CONFIG.CODER_B_NAME };
-  if (token === CONFIG.ADMIN_TOKEN)   return { id: 'Test', name: 'Guest Tester' };
+  if (matchesConfiguredToken(token, CONFIG.CODER_A_TOKEN))
+    return { id: 'A', name: CONFIG.CODER_A_NAME };
+  if (matchesConfiguredToken(token, CONFIG.CODER_B_TOKEN))
+    return { id: 'B', name: CONFIG.CODER_B_NAME };
+  if (matchesConfiguredToken(token, CONFIG.ADMIN_TOKEN))
+    return { id: 'Test', name: 'Guest Tester' };
   return null;
 }
 
 function authMiddleware(req, res, next) {
-  const token = req.query.token || req.headers['x-coder-token'];
-  const coder = resolveCoder(token);
-  if (!coder) return res.status(401).json({ error: 'Invalid token. Use ?token=YOUR_TOKEN in the URL.' });
+  // Refuse missing credentials and never accept credentials in URLs.
+  const match = /^Bearer ([^\s]+)$/.exec(req.get('Authorization') || '');
+  const coder = resolveCoder(match ? match[1] : null);
+  if (!coder) return res.status(401).json({ error: 'Unauthorized.' });
   req.coder = coder;
-  req.token = token;
   next();
 }
 
@@ -127,11 +148,23 @@ app.get('/api/posts', authMiddleware, async (req, res) => {
   }
 });
 
+// Accept only known labels and bounded text before writing to Airtable.
+function validDimensions(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= DIMENSIONS.length &&
+    value.every(d => typeof d === 'string' && DIMENSIONS.includes(d)) &&
+    new Set(value).size === value.length &&
+    !(value.includes('none') && value.length !== 1);
+}
+
 // Save coding for one post
 app.post('/api/save', authMiddleware, async (req, res) => {
   try {
-    const { recordId, imgDim, capDim, ovDim, note } = req.body;
-    if (!recordId) return res.status(400).json({ error: 'recordId required' });
+    const { recordId, imgDim, capDim, ovDim, note = '' } = req.body || {};
+    if (typeof recordId !== 'string' || !/^rec[A-Za-z0-9]{10,30}$/.test(recordId) ||
+        !validDimensions(imgDim) || !validDimensions(capDim) || !validDimensions(ovDim) ||
+        typeof note !== 'string' || note.length > 2000) {
+      return res.status(400).json({ error: 'Invalid annotation data.' });
+    }
 
     const coderKey = `Coder${req.coder.id}`;
     const fields = {
@@ -146,7 +179,7 @@ app.post('/api/save', authMiddleware, async (req, res) => {
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('Airtable save error:', JSON.stringify(detail));
-    res.status(500).json({ error: 'Failed to save to Airtable.', detail });
+    res.status(500).json({ error: 'Failed to save to Airtable.' });
   }
 });
 
@@ -197,11 +230,11 @@ const DIMENSIONS_JSON = JSON.stringify(DIMENSIONS);
 const DIMENSION_LABELS_JSON = JSON.stringify(DIMENSION_LABELS);
 
 app.get('/', (req, res) => {
-  const token = req.query.token || '';
-  res.send(buildHTML(token));
+  if (req.query.token !== undefined) return res.redirect(302, '/');
+  res.send(buildHTML());
 });
 
-function buildHTML(token) {
+function buildHTML() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -708,7 +741,13 @@ function buildHTML(token) {
 <div id="authScreen">
   <div class="center-card">
     <h1>🌲 CSR Coder</h1>
-    <p>To access the coding interface, please use the link provided by your research supervisor.</p>
+    <p>Enter the private access token supplied by your research team. It is kept only in this browser tab's memory.</p>
+    <form id="loginForm" onsubmit="authenticate(event)" style="display:grid;gap:12px;margin-top:20px;text-align:left;">
+      <label for="accessToken">Access token</label>
+      <input id="accessToken" type="password" autocomplete="off" required placeholder="Access token"
+        style="width:100%;padding:12px;border:1px solid #ccc;border-radius:6px;" />
+      <button type="submit" class="btn btn-primary">Unlock coding interface</button>
+    </form>
     <p class="error-msg" id="authError"></p>
   </div>
 </div>
@@ -901,7 +940,7 @@ function buildHTML(token) {
 </div>
 
 <script>
-const TOKEN = '${token}';
+let TOKEN = '';
 const DIMENSIONS = ${DIMENSIONS_JSON};
 const DIMENSION_LABELS = ${DIMENSION_LABELS_JSON};
 
@@ -915,13 +954,25 @@ let draft = { imgDim: [], capDim: [], ovDim: [], note: '' };
 let currentImgIdx = 0;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+async function authenticate(event) {
+  event.preventDefault();
+  const input = document.getElementById('accessToken');
+  TOKEN = input.value.trim();
+  input.value = '';
+  if (!TOKEN) { showAuth('Access token required.'); return; }
+  document.getElementById('authScreen').style.display = 'none';
+  document.getElementById('loadingScreen').style.display = 'flex';
+  await init();
+}
+
 async function init() {
-  if (!TOKEN) { showAuth('No token provided.'); return; }
+  if (!TOKEN) { showAuth('Enter your access token to continue.'); return; }
 
   try {
-    const res = await fetch('/api/posts?token=' + TOKEN);
+    const res = await fetch('/api/posts', { headers: { Authorization: 'Bearer ' + TOKEN } });
     if (res.status === 401) {
       const d = await res.json();
+      TOKEN = '';
       showAuth(d.error || 'Invalid token.');
       return;
     }
@@ -948,7 +999,7 @@ async function init() {
     document.getElementById('app').style.display = 'flex';
     renderPost(currentIdx);
   } catch (err) {
-    showAuth('Failed to connect to server. ' + err.message);
+    showAuth('Could not load posts. Check your token or server connection.');
   }
 }
 
@@ -1064,7 +1115,13 @@ function renderImages(urls) {
     return;
   }
 
-  container.innerHTML = \`<img id="mainImg" src="\${urls[0]}" alt="Post image" />\`;
+  container.replaceChildren();
+  if (!/^https?:\\/\\//i.test(urls[0])) { container.textContent = 'Invalid image URL'; return; }
+  const img = document.createElement('img');
+  img.id = 'mainImg';
+  img.alt = 'Post image';
+  img.src = urls[0];
+  container.appendChild(img);
   document.getElementById('imgPrev').style.display = urls.length > 1 ? 'flex' : 'none';
   document.getElementById('imgNext').style.display = urls.length > 1 ? 'flex' : 'none';
 
@@ -1088,7 +1145,7 @@ function goToImg(i) {
   const urls = posts[currentIdx].imageUrls;
   currentImgIdx = i;
   const img = document.getElementById('mainImg');
-  if (img) img.src = urls[i];
+  if (img && /^https?:\\/\\//i.test(urls[i])) img.src = urls[i];
   document.querySelectorAll('.image-dot').forEach((d, idx) => d.classList.toggle('active', idx === i));
 }
 
@@ -1128,9 +1185,9 @@ async function saveCurrentPost() {
   statusEl.textContent = 'Saving…';
 
   try {
-    const res = await fetch('/api/save?token=' + TOKEN, {
+    const res = await fetch('/api/save', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
       body: JSON.stringify({
         recordId: post.recordId,
         imgDim: draft.imgDim,
@@ -1185,7 +1242,7 @@ async function openDisagreements() {
   document.getElementById('dEmptyState').style.display = 'none';
 
   try {
-    const res = await fetch('/api/disagreements?token=' + TOKEN);
+    const res = await fetch('/api/disagreements', { headers: { Authorization: 'Bearer ' + TOKEN } });
     const data = await res.json();
     disagPosts = data.disagreements || [];
 
@@ -1241,11 +1298,13 @@ function dRenderPost(idx) {
       el.innerHTML = '<span class="dim-pill no-dim">None / Not coded</span>';
       return;
     }
-    el.innerHTML = dims.map(d => {
-      const isNone = d === 'none';
-      const label = DIMENSION_LABELS[d] || d;
-      return '<span class="dim-pill ' + (isNone ? 'no-dim' : 'has-dim') + '">' + label + '</span>';
-    }).join('');
+    el.replaceChildren();
+    dims.forEach(d => {
+      const pill = document.createElement('span');
+      pill.className = 'dim-pill ' + (d === 'none' ? 'no-dim' : 'has-dim');
+      pill.textContent = DIMENSION_LABELS[d] || String(d);
+      el.appendChild(pill);
+    });
   }
   renderPills(post.coderA_ov, 'dCoderADims');
   renderPills(post.coderB_ov, 'dCoderBDims');
@@ -1274,7 +1333,14 @@ function dRenderImages(urls) {
     container.innerHTML = '<div class="no-image">No image</div>';
     dots.innerHTML = ''; return;
   }
-  container.innerHTML = '<img id="dMainImg" src="' + urls[0] + '" style="max-width:100%;max-height:500px;object-fit:contain;display:block;border-radius:4px;" />';
+  container.replaceChildren();
+  if (!/^https?:\\/\\//i.test(urls[0])) { container.textContent = 'Invalid image URL'; return; }
+  const img = document.createElement('img');
+  img.id = 'dMainImg';
+  img.alt = 'Post image';
+  img.style.cssText = 'max-width:100%;max-height:500px;object-fit:contain;display:block;border-radius:4px;';
+  img.src = urls[0];
+  container.appendChild(img);
   document.getElementById('dImgPrev').style.display = urls.length > 1 ? 'flex' : 'none';
   document.getElementById('dImgNext').style.display = urls.length > 1 ? 'flex' : 'none';
   dots.innerHTML = urls.map((_,i) =>
@@ -1293,7 +1359,7 @@ function dGoToImg(i) {
   const urls = disagPosts[disagIdx].imageUrls;
   dImgIdx = i;
   const img = document.getElementById('dMainImg');
-  if (img) img.src = urls[i];
+  if (img && /^https?:\\/\\//i.test(urls[i])) img.src = urls[i];
   document.querySelectorAll('#dImageDots .image-dot').forEach((d,idx) => d.classList.toggle('active', idx===i));
 }
 
@@ -1365,9 +1431,9 @@ async function dSavePost() {
   statusEl.textContent = 'Saving…';
 
   try {
-    const res = await fetch('/api/save?token=' + TOKEN, {
+    const res = await fetch('/api/save', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', Authorization: 'Bearer ' + TOKEN},
       body: JSON.stringify({
         recordId: post.recordId,
         imgDim: dDraft.imgDim,
@@ -1386,7 +1452,7 @@ async function dSavePost() {
 
     // Check if this resolves the disagreement
     const myOv = dDraft.ovDim;
-    const otherOv = TOKEN === '' ? disagPosts[disagIdx].coderB_ov : disagPosts[disagIdx].coderA_ov;
+    const otherOv = coderId === 'A' ? disagPosts[disagIdx].coderB_ov : disagPosts[disagIdx].coderA_ov;
     const hasReal = dims => dims.some(d => d !== 'none' && d !== '');
     if (hasReal(myOv) === hasReal(otherOv)) {
       // Resolved! Remove from list
@@ -1425,4 +1491,7 @@ init();
 
 // ── Start ──────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`CSR Coder running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log('CSR Coder running on port ' + PORT));
+}
+module.exports = { app, resolveCoder, validDimensions };
