@@ -741,7 +741,13 @@ function buildHTML() {
 <div id="authScreen">
   <div class="center-card">
     <h1>🌲 CSR Coder</h1>
-    <p>To access the coding interface, please use the link provided by your research supervisor.</p>
+    <p>Enter the private access token supplied by your research team. It is kept only in this browser tab's memory.</p>
+    <form id="loginForm" onsubmit="authenticate(event)" style="display:grid;gap:12px;margin-top:20px;text-align:left;">
+      <label for="accessToken">Access token</label>
+      <input id="accessToken" type="password" autocomplete="off" required placeholder="Access token"
+        style="width:100%;padding:12px;border:1px solid #ccc;border-radius:6px;" />
+      <button type="submit" class="btn btn-primary">Unlock coding interface</button>
+    </form>
     <p class="error-msg" id="authError"></p>
   </div>
 </div>
@@ -934,7 +940,7 @@ function buildHTML() {
 </div>
 
 <script>
-const TOKEN = '${token}';
+let TOKEN = '';
 const DIMENSIONS = ${DIMENSIONS_JSON};
 const DIMENSION_LABELS = ${DIMENSION_LABELS_JSON};
 
@@ -948,13 +954,25 @@ let draft = { imgDim: [], capDim: [], ovDim: [], note: '' };
 let currentImgIdx = 0;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+async function authenticate(event) {
+  event.preventDefault();
+  const input = document.getElementById('accessToken');
+  TOKEN = input.value.trim();
+  input.value = '';
+  if (!TOKEN) { showAuth('Access token required.'); return; }
+  document.getElementById('authScreen').style.display = 'none';
+  document.getElementById('loadingScreen').style.display = 'flex';
+  await init();
+}
+
 async function init() {
-  if (!TOKEN) { showAuth('No token provided.'); return; }
+  if (!TOKEN) { showAuth('Enter your access token to continue.'); return; }
 
   try {
-    const res = await fetch('/api/posts?token=' + TOKEN);
+    const res = await fetch('/api/posts', { headers: { Authorization: 'Bearer ' + TOKEN } });
     if (res.status === 401) {
       const d = await res.json();
+      TOKEN = '';
       showAuth(d.error || 'Invalid token.');
       return;
     }
@@ -981,7 +999,7 @@ async function init() {
     document.getElementById('app').style.display = 'flex';
     renderPost(currentIdx);
   } catch (err) {
-    showAuth('Failed to connect to server. ' + err.message);
+    showAuth('Could not load posts. Check your token or server connection.');
   }
 }
 
@@ -1161,9 +1179,9 @@ async function saveCurrentPost() {
   statusEl.textContent = 'Saving…';
 
   try {
-    const res = await fetch('/api/save?token=' + TOKEN, {
+    const res = await fetch('/api/save', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
       body: JSON.stringify({
         recordId: post.recordId,
         imgDim: draft.imgDim,
@@ -1218,7 +1236,7 @@ async function openDisagreements() {
   document.getElementById('dEmptyState').style.display = 'none';
 
   try {
-    const res = await fetch('/api/disagreements?token=' + TOKEN);
+    const res = await fetch('/api/disagreements', { headers: { Authorization: 'Bearer ' + TOKEN } });
     const data = await res.json();
     disagPosts = data.disagreements || [];
 
@@ -1398,9 +1416,9 @@ async function dSavePost() {
   statusEl.textContent = 'Saving…';
 
   try {
-    const res = await fetch('/api/save?token=' + TOKEN, {
+    const res = await fetch('/api/save', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', Authorization: 'Bearer ' + TOKEN},
       body: JSON.stringify({
         recordId: post.recordId,
         imgDim: dDraft.imgDim,
