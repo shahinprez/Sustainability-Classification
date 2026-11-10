@@ -1,0 +1,17 @@
+{
+  "name": "csr-coding-tool",
+  "version": "1.0.0",
+  "description": "Manual CSR coding interface for Swedish forestry Instagram study",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
